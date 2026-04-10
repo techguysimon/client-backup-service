@@ -143,7 +143,7 @@
 
   <script>
     let currentJobId = null;
-    let evSource = null;
+    let pollInterval = null;
 
     async function startBackup() {
       const pw = document.getElementById("pw").value;
@@ -181,42 +181,41 @@
         const { job_id } = await res.json();
         currentJobId = job_id;
         btn.textContent = "Backup Running...";
-        connectStream(job_id);
+        startPolling(job_id);
       } catch (e) {
         showError("Network error: " + e.message);
         resetBtn();
       }
     }
 
-    function connectStream(jobId) {
-      if (evSource) evSource.close();
-      evSource = new EventSource(`/api/backup/${jobId}/stream`);
+    async function startPolling(jobId) {
+      clearInterval(pollInterval);
 
-      evSource.addEventListener("message", (e) => {
-        const d = JSON.parse(e.data);
-        setProgress(d.progress, d.message);
-      });
+      async function poll() {
+        try {
+          const res = await fetch(`/api/backup/${jobId}`);
+          if (!res.ok) return;
+          const d = await res.json();
+          setProgress(d.progress, d.message);
 
-      evSource.addEventListener("done", (e) => {
-        const d = JSON.parse(e.data);
-        setProgress(100, "Done!");
-        triggerDownload(`/api/backup/${jobId}/download`);
-        document.getElementById("successBox").classList.add("visible");
-        resetBtn();
-        evSource.close();
-      });
+          if (d.status === "ready") {
+            clearInterval(pollInterval);
+            setProgress(100, "Done!");
+            triggerDownload(`/api/backup/${jobId}/download`);
+            document.getElementById("successBox").classList.add("visible");
+            resetBtn();
+          } else if (d.status === "error") {
+            clearInterval(pollInterval);
+            showError(d.message || "Backup failed.");
+            resetBtn();
+          }
+        } catch (e) {
+          // Network error — keep polling
+        }
+      }
 
-      evSource.addEventListener("error", (e) => {
-        // EventSource doesn't give us the body on error, poll for status
-        fetch(`/api/backup/${jobId}`)
-          .then(r => r.json())
-          .then(d => {
-            if (d.status === "error") showError(d.message || "Backup failed.");
-          })
-          .catch(() => showError("Connection lost."));
-        resetBtn();
-        evSource.close();
-      });
+      await poll();
+      pollInterval = setInterval(poll, 2000);
     }
 
     function setProgress(pct, msg) {
