@@ -1,0 +1,33 @@
+#!/usr/bin/expect -f
+
+set timeout 300
+set app "client-backup"
+set repo "techguysimon/client-backup-service"
+set branch "main"
+
+spawn caprover deploy --caproverName bluebeast --caproverApp $app --branch $branch
+
+expect {
+    "Select CapRover machine" {
+        send "bluebeast\r"
+        exp_continue
+    }
+    "Not a git repository" {
+        puts "ERROR: Not a git repository"
+        exit 1
+    }
+    "Could not resolve Git remote" {
+        puts "ERROR: No git remote configured"
+        exit 1
+    }
+    "Error" {
+        puts "ERROR: $expect_out(0,string)"
+        exit 1
+    }
+    eof {
+        # Wait for process to finish
+    }
+}
+
+set result $expect_out(buffer)
+puts "OUTPUT: $result"

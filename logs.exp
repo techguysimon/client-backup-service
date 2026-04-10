@@ -1,0 +1,7 @@
+#!/usr/bin/expect -f
+
+set timeout 20
+spawn caprover api --caproverName bluebeast -t "/api/v2/user/app/client-backup/logs" -m GET
+
+expect eof
+puts "LOGS: $expect_out(buffer)"

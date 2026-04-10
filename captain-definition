@@ -1,0 +1,99 @@
+{
+  "captainVersion": 4,
+  "services": {
+    "$$cap_appname$$": {
+      "image": "oven/bun:1-debian",
+      "restart": "always",
+      "ports": [
+        "8080:8080"
+      ],
+      "workingDir": "/app",
+      "command": "bash -c 'bun install --frozen-lockfile && bun run src/index.ts'",
+      "environment": {
+        "BACKUP_PASSWORD": "$$cap_backup_password$$",
+        "GITHUB_TOKEN": "$$cap_github_token$$",
+        "GITHUB_REPO": "$$cap_github_repo$$",
+        "GITHUB_BRANCH": "$$cap_github_branch$$",
+        "R2_ENDPOINT": "$$cap_r2_endpoint$$",
+        "R2_ACCESS_KEY": "$$cap_r2_access_key$$",
+        "R2_SECRET_KEY": "$$cap_r2_secret_key$$",
+        "R2_BUCKET": "$$cap_r2_bucket$$",
+        "PORT": "8080"
+      },
+      "caproverExtra": {
+        "notExposeAsWebApp": "false",
+        "containerHttpPort": "8080"
+      }
+    }
+  },
+  "caproverOneClickApp": {
+    "variables": [
+      {
+        "id": "$$cap_appname$$",
+        "label": "App Name",
+        "defaultValue": "client-backup",
+        "validRegex": "/^([a-zA-Z0-9-])+$/"
+      },
+      {
+        "id": "$$cap_backup_password$$",
+        "label": "Backup Password",
+        "description": "Password your client enters to download a backup",
+        "defaultValue": "",
+        "validRegex": "/^.{4,}$/"
+      },
+      {
+        "id": "$$cap_github_token$$",
+        "label": "GitHub Personal Access Token",
+        "description": "Token with repo:scope to download the source zip",
+        "defaultValue": "",
+        "validRegex": ""
+      },
+      {
+        "id": "$$cap_github_repo$$",
+        "label": "GitHub Repository",
+        "description": "Owner/repo format, e.g. techguysimon/idrivesocal-main",
+        "defaultValue": "techguysimon/idrivesocal-main",
+        "validRegex": "/^[^\\/]+\\/[^\\/]+$/"
+      },
+      {
+        "id": "$$cap_github_branch$$",
+        "label": "GitHub Branch",
+        "defaultValue": "main",
+        "validRegex": ""
+      },
+      {
+        "id": "$$cap_r2_endpoint$$",
+        "label": "Cloudflare R2 Endpoint",
+        "description": "R2 endpoint URL from the R2 dashboard (Settings > R2)",
+        "defaultValue": "",
+        "validRegex": ""
+      },
+      {
+        "id": "$$cap_r2_access_key$$",
+        "label": "R2 Access Key ID",
+        "defaultValue": "",
+        "validRegex": ""
+      },
+      {
+        "id": "$$cap_r2_secret_key$$",
+        "label": "R2 Secret Access Key",
+        "defaultValue": "",
+        "validRegex": ""
+      },
+      {
+        "id": "$$cap_r2_bucket$$",
+        "label": "R2 Bucket Name",
+        "description": "The R2 bucket containing media files to back up",
+        "defaultValue": "idrivesocal-media",
+        "validRegex": ""
+      }
+    ],
+    "instructions": {
+      "start": "Deploys a self-service backup download page for your client. Enter GitHub repo and R2 credentials. Your client visits the URL, enters a password, and downloads a zip with latest source + all R2 media files.",
+      "end": "Your backup service is live at https://$$cap_appname$$.***"
+    },
+    "displayName": "Client Backup Download",
+    "isOfficial": false,
+    "description": "Self-service backup — GitHub source + R2 media in one zip"
+  }
+}
