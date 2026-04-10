@@ -1,0 +1,13 @@
+{
+  "name": "client-backup-service",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "dev": "bun --watch src/index.ts"
+  },
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "nanoid": "^5.0.9"
+  }
+}

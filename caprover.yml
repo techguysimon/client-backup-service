@@ -1,0 +1,23 @@
+caproverOneClickApp:
+  captiveCoreOverrideVariables:
+    NGINX_FORCE_SSL: 'false'
+  envVars:
+    - key: BACKUP_PASSWORD
+      description: Password the client uses to access the backup download page
+    - key: GITHUB_TOKEN
+      description: GitHub personal access token for fetching the repo zip
+    - key: GITHUB_REPO
+      description: GitHub repo in format owner/repo, e.g. techguysimon/idrivesocal-main
+      defaultValue: techguysimon/idrivesocal-main
+    - key: GITHUB_BRANCH
+      description: Branch to download from GitHub
+      defaultValue: main
+    - key: R2_ENDPOINT
+      description: Cloudflare R2 endpoint URL
+    - key: R2_ACCESS_KEY
+      description: R2 access key ID
+    - key: R2_SECRET_KEY
+      description: R2 secret access key
+    - key: R2_BUCKET
+      description: R2 bucket name, e.g. idrivesocal-media
+      defaultValue: idrivesocal-media

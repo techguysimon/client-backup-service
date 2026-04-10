@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Client Backup</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f4f4f8;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1rem;
+    }
+    .card {
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 2px 16px rgba(0,0,0,0.08);
+      padding: 2rem;
+      width: 100%;
+      max-width: 420px;
+    }
+    .card h1 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      margin-bottom: 0.25rem;
+      color: #1a1a2e;
+    }
+    .card p {
+      font-size: 0.875rem;
+      color: #666;
+      margin-bottom: 1.5rem;
+    }
+    .field { margin-bottom: 1rem; }
+    .field label {
+      display: block;
+      font-size: 0.8rem;
+      font-weight: 500;
+      color: #444;
+      margin-bottom: 0.4rem;
+    }
+    .field input {
+      width: 100%;
+      padding: 0.6rem 0.8rem;
+      border: 1.5px solid #ddd;
+      border-radius: 8px;
+      font-size: 0.95rem;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    .field input:focus { border-color: #4a6cf7; }
+    .btn {
+      width: 100%;
+      padding: 0.75rem;
+      background: #4a6cf7;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .btn:hover:not(:disabled) { background: #3a5ce5; }
+    .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+    #status {
+      margin-top: 1.25rem;
+      display: none;
+    }
+    #status.visible { display: block; }
+    .progress-bar {
+      height: 6px;
+      background: #eee;
+      border-radius: 99px;
+      overflow: hidden;
+      margin-bottom: 0.6rem;
+    }
+    .progress-fill {
+      height: 100%;
+      background: #4a6cf7;
+      border-radius: 99px;
+      transition: width 0.3s ease;
+      width: 0%;
+    }
+    .status-msg {
+      font-size: 0.8rem;
+      color: #555;
+      display: flex;
+      justify-content: space-between;
+    }
+    .pct { font-weight: 600; color: #4a6cf7; }
+    .error {
+      background: #fff0f0;
+      border: 1px solid #ffcccc;
+      border-radius: 8px;
+      padding: 0.75rem;
+      color: #c00;
+      font-size: 0.85rem;
+      margin-top: 1rem;
+      display: none;
+    }
+    .error.visible { display: block; }
+    .success {
+      background: #f0fff0;
+      border: 1px solid #ccffcc;
+      border-radius: 8px;
+      padding: 0.75rem;
+      color: #2a7;
+      font-size: 0.85rem;
+      margin-top: 1rem;
+      display: none;
+    }
+    .success.visible { display: block; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Client Backup</h1>
+    <p>Package and download the latest source and media files.</p>
+
+    <div class="field">
+      <label for="pw">Access Password</label>
+      <input type="password" id="pw" placeholder="Enter password" autocomplete="current-password" />
+    </div>
+    <button class="btn" id="startBtn" onclick="startBackup()">Create Backup</button>
+
+    <div id="status">
+      <div class="progress-bar"><div class="progress-fill" id="fill"></div></div>
+      <div class="status-msg">
+        <span id="msgText">Preparing...</span>
+        <span class="pct" id="pctText">0%</span>
+      </div>
+    </div>
+
+    <div class="error" id="errorBox"></div>
+    <div class="success" id="successBox">
+      Download started automatically. Check your downloads folder.
+    </div>
+  </div>
+
+  <script>
+    let currentJobId = null;
+    let evSource = null;
+
+    async function startBackup() {
+      const pw = document.getElementById("pw").value;
+      const btn = document.getElementById("startBtn");
+      const status = document.getElementById("status");
+      const errorBox = document.getElementById("errorBox");
+      const successBox = document.getElementById("successBox");
+
+      errorBox.classList.remove("visible");
+      successBox.classList.remove("visible");
+      btn.disabled = true;
+      btn.textContent = "Creating Backup...";
+      status.classList.add("visible");
+      setProgress(0, "Starting...");
+
+      try {
+        const res = await fetch("/api/backup", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password: pw }),
+        });
+
+        if (res.status === 401) {
+          showError("Incorrect password.");
+          resetBtn();
+          return;
+        }
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ error: "Unknown error" }));
+          showError(err.error || `Request failed (${res.status})`);
+          resetBtn();
+          return;
+        }
+
+        const { job_id } = await res.json();
+        currentJobId = job_id;
+        btn.textContent = "Backup Running...";
+        connectStream(job_id);
+      } catch (e) {
+        showError("Network error: " + e.message);
+        resetBtn();
+      }
+    }
+
+    function connectStream(jobId) {
+      if (evSource) evSource.close();
+      evSource = new EventSource(`/api/backup/${jobId}/stream`);
+
+      evSource.addEventListener("message", (e) => {
+        const d = JSON.parse(e.data);
+        setProgress(d.progress, d.message);
+      });
+
+      evSource.addEventListener("done", (e) => {
+        const d = JSON.parse(e.data);
+        setProgress(100, "Done!");
+        triggerDownload(`/api/backup/${jobId}/download`);
+        document.getElementById("successBox").classList.add("visible");
+        resetBtn();
+        evSource.close();
+      });
+
+      evSource.addEventListener("error", (e) => {
+        // EventSource doesn't give us the body on error, poll for status
+        fetch(`/api/backup/${jobId}`)
+          .then(r => r.json())
+          .then(d => {
+            if (d.status === "error") showError(d.message || "Backup failed.");
+          })
+          .catch(() => showError("Connection lost."));
+        resetBtn();
+        evSource.close();
+      });
+    }
+
+    function setProgress(pct, msg) {
+      document.getElementById("fill").style.width = pct + "%";
+      document.getElementById("pctText").textContent = pct + "%";
+      document.getElementById("msgText").textContent = msg;
+    }
+
+    function showError(msg) {
+      const box = document.getElementById("errorBox");
+      box.textContent = msg;
+      box.classList.add("visible");
+    }
+
+    function triggerDownload(url) {
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    }
+
+    function resetBtn() {
+      const btn = document.getElementById("startBtn");
+      btn.disabled = false;
+      btn.textContent = "Create Backup";
+    }
+  </script>
+</body>
+</html>
