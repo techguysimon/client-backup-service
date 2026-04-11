@@ -2,6 +2,7 @@
 import { S3Client, ListObjectsV2Command, GetObjectCommand } from "@aws-sdk/client-s3";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { createWriteStream } from "node:fs";
+import { rm } from "node:fs/promises";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
@@ -27,8 +28,11 @@ export interface R2Object {
 }
 
 const R2_CONNECTION_TIMEOUT_MS = 10_000;
-const R2_REQUEST_TIMEOUT_MS = 300_000;
-const R2_SOCKET_TIMEOUT_MS = 60_000;
+const R2_REQUEST_TIMEOUT_MS = 30_000;
+const R2_SOCKET_TIMEOUT_MS = 10_000;
+const R2_STREAM_IDLE_TIMEOUT_MS = 10_000;
+const R2_RETRY_ATTEMPTS = 4;
+const R2_RETRY_BASE_DELAY_MS = 1_000;
 
 function createR2Client(config: R2Config): S3Client {
   return new S3Client({
@@ -47,6 +51,85 @@ function createR2Client(config: R2Config): S3Client {
       throwOnRequestTimeout: true,
     }),
   });
+}
+
+function getR2StreamIdleTimeoutMs(): number {
+  const parsed = Number.parseInt(process.env.R2_STREAM_IDLE_TIMEOUT_MS ?? "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : R2_STREAM_IDLE_TIMEOUT_MS;
+}
+
+async function pipelineWithIdleTimeout(stream: Readable, outputPath: string): Promise<void> {
+  const idleTimeoutMs = getR2StreamIdleTimeoutMs();
+  let lastActivity = Date.now();
+  const onData = () => {
+    lastActivity = Date.now();
+  };
+
+  stream.on("data", onData);
+
+  const idleTimer = setInterval(() => {
+    if (Date.now() - lastActivity <= idleTimeoutMs) {
+      return;
+    }
+
+    const error = new Error(`R2 stream idle for ${idleTimeoutMs}ms`);
+    error.name = "TimeoutError";
+    stream.destroy(error);
+  }, Math.max(25, Math.min(1_000, Math.floor(idleTimeoutMs / 2))));
+
+  try {
+    await pipeline(stream, createWriteStream(outputPath));
+  } finally {
+    clearInterval(idleTimer);
+    stream.off("data", onData);
+  }
+}
+
+function formatError(error: unknown): string {
+  if (error instanceof Error) {
+    return `${error.name}: ${error.message}`;
+  }
+
+  return String(error);
+}
+
+function isRetryableR2Error(error: unknown): boolean {
+  const description = formatError(error).toLowerCase();
+
+  return !(
+    description.includes("nosuchkey") ||
+    description.includes("not found") ||
+    description.includes("status code 404")
+  );
+}
+
+async function retryR2Operation<T>(
+  label: string,
+  operation: () => Promise<T>,
+  onProgress?: (msg: string) => void
+): Promise<T> {
+  let attempt = 0;
+  let lastError: unknown;
+
+  while (attempt < R2_RETRY_ATTEMPTS) {
+    attempt += 1;
+
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+
+      if (!isRetryableR2Error(error) || attempt >= R2_RETRY_ATTEMPTS) {
+        throw error;
+      }
+
+      const delayMs = R2_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1);
+      onProgress?.(`${label} failed (${formatError(error)}). Retrying in ${delayMs}ms (${attempt}/${R2_RETRY_ATTEMPTS})...`);
+      await Bun.sleep(delayMs);
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(`${label} failed after retries`);
 }
 
 function toNodeReadable(body: unknown): Readable {
@@ -90,20 +173,27 @@ export async function listR2Objects(
   onProgress?: (msg: string) => void
 ): Promise<R2Object[]> {
   onProgress?.("Fetching R2 file list...");
-  const client = createR2Client(config);
   const allObjects: R2Object[] = [];
   let continuationToken: string | undefined;
   let page = 0;
 
   do {
-    const command = new ListObjectsV2Command({
-      Bucket: config.bucket,
-      MaxKeys: 1000,
-      ...(continuationToken ? { ContinuationToken: continuationToken } : {}),
-    });
+    const currentPage = page + 1;
+    const res = await retryR2Operation(
+      `Listing R2 page ${currentPage}`,
+      async () => {
+        const client = createR2Client(config);
+        const command = new ListObjectsV2Command({
+          Bucket: config.bucket,
+          MaxKeys: 1000,
+          ...(continuationToken ? { ContinuationToken: continuationToken } : {}),
+        });
 
-    const res = await client.send(command);
-    page += 1;
+        return client.send(command);
+      },
+      onProgress
+    );
+    page = currentPage;
 
     if (res.Contents) {
       for (const obj of res.Contents) {
@@ -152,9 +242,16 @@ export async function downloadR2ObjectToFile(
   outputPath: string,
   onProgress?: (msg: string) => void
 ): Promise<string> {
-  const stream = await downloadR2ObjectStream(config, key, onProgress);
-  await pipeline(stream, createWriteStream(outputPath));
-  return outputPath;
+  return retryR2Operation(
+    `Downloading ${key}`,
+    async () => {
+      await rm(outputPath, { force: true }).catch(() => {});
+      const stream = await downloadR2ObjectStream(config, key, onProgress);
+      await pipelineWithIdleTimeout(stream, outputPath);
+      return outputPath;
+    },
+    onProgress
+  );
 }
 
 export async function downloadR2Object(

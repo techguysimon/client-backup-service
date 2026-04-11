@@ -6,9 +6,23 @@ import { Readable } from "node:stream";
 
 let lastS3ClientConfig: Record<string, unknown> | undefined;
 let lastHttpHandlerOptions: Record<string, unknown> | undefined;
+let listTimeoutOnce = false;
+let getStreamFailOnce = false;
+let getStreamIdleOnce = false;
+let listCallCount = 0;
+let getCallCount = 0;
+const originalIdleTimeoutEnv = process.env.R2_STREAM_IDLE_TIMEOUT_MS;
 
 const sendMock = mock(async (command: { input?: Record<string, unknown> }) => {
   if (command instanceof MockListObjectsV2Command) {
+    listCallCount += 1;
+
+    if (listTimeoutOnce && listCallCount === 1) {
+      const error = new Error("list timed out");
+      error.name = "TimeoutError";
+      throw error;
+    }
+
     const token = command.input?.ContinuationToken as string | undefined;
 
     if (!token) {
@@ -38,6 +52,33 @@ const sendMock = mock(async (command: { input?: Record<string, unknown> }) => {
   }
 
   if (command instanceof MockGetObjectCommand) {
+    getCallCount += 1;
+
+    if (getStreamFailOnce && getCallCount === 1) {
+      const stream = new Readable({
+        read() {
+          this.push("partial");
+          process.nextTick(() => this.destroy(new Error("socket hang up")));
+        },
+      });
+
+      return { Body: stream };
+    }
+
+    if (getStreamIdleOnce && getCallCount === 1) {
+      let sent = false;
+      const stream = new Readable({
+        read() {
+          if (!sent) {
+            sent = true;
+            this.push("partial");
+          }
+        },
+      });
+
+      return { Body: stream };
+    }
+
     return {
       Body: Readable.from(["streamed-object"]),
     };
@@ -88,6 +129,16 @@ describe("r2 service", () => {
     sendMock.mockClear();
     lastS3ClientConfig = undefined;
     lastHttpHandlerOptions = undefined;
+    listTimeoutOnce = false;
+    getStreamFailOnce = false;
+    getStreamIdleOnce = false;
+    listCallCount = 0;
+    getCallCount = 0;
+    if (originalIdleTimeoutEnv === undefined) {
+      delete process.env.R2_STREAM_IDLE_TIMEOUT_MS;
+    } else {
+      process.env.R2_STREAM_IDLE_TIMEOUT_MS = originalIdleTimeoutEnv;
+    }
   });
 
   afterEach(() => {
@@ -107,6 +158,20 @@ describe("r2 service", () => {
     expect(objects).toHaveLength(2);
     expect(objects.map((object) => object.key)).toEqual(["first.jpg", "second.jpg"]);
     expect(sendMock).toHaveBeenCalledTimes(2);
+  });
+
+  test("retries a timed-out list page", async () => {
+    listTimeoutOnce = true;
+
+    const objects = await listR2Objects({
+      endpoint: "https://example.r2.cloudflarestorage.com",
+      accessKey: "test-access-key",
+      secretKey: "test-secret-key",
+      bucket: "test-bucket",
+    });
+
+    expect(objects).toHaveLength(2);
+    expect(listCallCount).toBe(3);
   });
 
   test("configures R2 requests with explicit HTTP timeouts", async () => {
@@ -161,5 +226,50 @@ describe("r2 service", () => {
     expect(writtenPath).toBe(outputPath);
     expect(readFileSync(outputPath, "utf8")).toBe("streamed-object");
     expect(sendMock).toHaveBeenCalledTimes(1);
+  });
+
+  test("retries a failed object stream when writing to a temp file", async () => {
+    getStreamFailOnce = true;
+    const dir = mkdtempSync(join(tmpdir(), "client-backup-r2-file-retry-"));
+    tempDirs.push(dir);
+    const outputPath = join(dir, "retry.jpg");
+
+    const writtenPath = await downloadR2ObjectToFile(
+      {
+        endpoint: "https://example.r2.cloudflarestorage.com",
+        accessKey: "test-access-key",
+        secretKey: "test-secret-key",
+        bucket: "test-bucket",
+      },
+      "retry.jpg",
+      outputPath
+    );
+
+    expect(writtenPath).toBe(outputPath);
+    expect(readFileSync(outputPath, "utf8")).toBe("streamed-object");
+    expect(getCallCount).toBe(2);
+  });
+
+  test("retries an idle object stream when writing to a temp file", async () => {
+    getStreamIdleOnce = true;
+    process.env.R2_STREAM_IDLE_TIMEOUT_MS = "50";
+    const dir = mkdtempSync(join(tmpdir(), "client-backup-r2-file-idle-"));
+    tempDirs.push(dir);
+    const outputPath = join(dir, "idle.jpg");
+
+    const writtenPath = await downloadR2ObjectToFile(
+      {
+        endpoint: "https://example.r2.cloudflarestorage.com",
+        accessKey: "test-access-key",
+        secretKey: "test-secret-key",
+        bucket: "test-bucket",
+      },
+      "idle.jpg",
+      outputPath
+    );
+
+    expect(writtenPath).toBe(outputPath);
+    expect(readFileSync(outputPath, "utf8")).toBe("streamed-object");
+    expect(getCallCount).toBe(2);
   });
 });
