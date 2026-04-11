@@ -1,7 +1,7 @@
 // Jobs lib — in-memory job store with SSE support
 import { nanoid } from "nanoid";
 
-export type JobStatus = "preparing" | "downloading_r2" | "archiving" | "ready" | "error" | "cancelled";
+export type JobStatus = "preparing" | "downloading_r2" | "archiving" | "cancelling" | "ready" | "error" | "cancelled";
 
 export interface Job {
   id: string;
@@ -11,6 +11,8 @@ export interface Job {
   createdAt: number;
   zipPath?: string;
   error?: string;
+  cancelRequested: boolean;
+  _abortController: AbortController;
   // SSE controllers for live updates
   _sseControllers: Set<ReadableStreamDefaultController>;
 }
@@ -20,6 +22,7 @@ const ACTIVE_BACKUP_STATUSES: JobStatus[] = [
   "preparing",
   "downloading_r2",
   "archiving",
+  "cancelling",
 ];
 const SSE_KEEPALIVE = 25_000; // 25s keepalive to prevent connection timeouts
 
@@ -41,6 +44,8 @@ export function createJob(): Job {
     progress: 0,
     message: "Starting backup...",
     createdAt: Date.now(),
+    cancelRequested: false,
+    _abortController: new AbortController(),
     _sseControllers: new Set(),
   };
   JOBS.set(job.id, job);
@@ -57,6 +62,28 @@ export function getActiveBackupJob(): Job | undefined {
 
 export function hasActiveBackupJob(): boolean {
   return getActiveBackupJob() !== undefined;
+}
+
+export function requestJobCancellation(id: string, message = "Cancelling backup..."): boolean {
+  const job = JOBS.get(id);
+  if (!job || job.cancelRequested) return false;
+
+  job.cancelRequested = true;
+  try {
+    job._abortController.abort(new Error("Backup cancelled"));
+  } catch {
+    // ignore abort errors from repeated calls
+  }
+  updateJob(id, { status: "cancelling", message });
+  return true;
+}
+
+export function isJobCancellationRequested(id: string): boolean {
+  return JOBS.get(id)?.cancelRequested ?? false;
+}
+
+export function getJobAbortSignal(id: string): AbortSignal | undefined {
+  return JOBS.get(id)?._abortController.signal;
 }
 
 export function updateJob(id: string, update: Partial<Pick<Job, "status" | "progress" | "message" | "zipPath" | "error">>) {
@@ -129,6 +156,12 @@ export function broadcastError(id: string, error: string) {
 export async function cleanupJob(id: string) {
   const job = JOBS.get(id);
   if (!job) return;
+  job.cancelRequested = true;
+  try {
+    job._abortController.abort(new Error("Backup cancelled"));
+  } catch {
+    // ignore abort errors from repeated cleanup calls
+  }
   job.status = "cancelled";
   for (const ctrl of Array.from(job._sseControllers)) {
     try { ctrl.close(); } catch { /* ignore */ }

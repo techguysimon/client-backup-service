@@ -58,14 +58,32 @@ function getR2StreamIdleTimeoutMs(): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : R2_STREAM_IDLE_TIMEOUT_MS;
 }
 
-async function pipelineWithIdleTimeout(stream: Readable, outputPath: string): Promise<void> {
+function createCancellationError(): Error {
+  const error = new Error("Backup cancelled");
+  error.name = "CancellationError";
+  return error;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw createCancellationError();
+  }
+}
+
+async function pipelineWithIdleTimeout(stream: Readable, outputPath: string, signal?: AbortSignal): Promise<void> {
+  throwIfAborted(signal);
+
   const idleTimeoutMs = getR2StreamIdleTimeoutMs();
   let lastActivity = Date.now();
   const onData = () => {
     lastActivity = Date.now();
   };
+  const onAbort = () => {
+    stream.destroy(createCancellationError());
+  };
 
   stream.on("data", onData);
+  signal?.addEventListener("abort", onAbort, { once: true });
 
   const idleTimer = setInterval(() => {
     if (Date.now() - lastActivity <= idleTimeoutMs) {
@@ -82,6 +100,7 @@ async function pipelineWithIdleTimeout(stream: Readable, outputPath: string): Pr
   } finally {
     clearInterval(idleTimer);
     stream.off("data", onData);
+    signal?.removeEventListener("abort", onAbort);
   }
 }
 
@@ -97,6 +116,9 @@ function isRetryableR2Error(error: unknown): boolean {
   const description = formatError(error).toLowerCase();
 
   return !(
+    description.includes("cancellationerror") ||
+    description.includes("aborterror") ||
+    description.includes("backup cancelled") ||
     description.includes("nosuchkey") ||
     description.includes("not found") ||
     description.includes("status code 404")
@@ -106,13 +128,15 @@ function isRetryableR2Error(error: unknown): boolean {
 async function retryR2Operation<T>(
   label: string,
   operation: () => Promise<T>,
-  onProgress?: (msg: string) => void
+  onProgress?: (msg: string) => void,
+  signal?: AbortSignal
 ): Promise<T> {
   let attempt = 0;
   let lastError: unknown;
 
   while (attempt < R2_RETRY_ATTEMPTS) {
     attempt += 1;
+    throwIfAborted(signal);
 
     try {
       return await operation();
@@ -126,6 +150,7 @@ async function retryR2Operation<T>(
       const delayMs = R2_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1);
       onProgress?.(`${label} failed (${formatError(error)}). Retrying in ${delayMs}ms (${attempt}/${R2_RETRY_ATTEMPTS})...`);
       await Bun.sleep(delayMs);
+      throwIfAborted(signal);
     }
   }
 
@@ -170,7 +195,8 @@ function toNodeReadable(body: unknown): Readable {
 
 export async function listR2Objects(
   config: R2Config,
-  onProgress?: (msg: string) => void
+  onProgress?: (msg: string) => void,
+  signal?: AbortSignal
 ): Promise<R2Object[]> {
   onProgress?.("Fetching R2 file list...");
   const allObjects: R2Object[] = [];
@@ -182,6 +208,7 @@ export async function listR2Objects(
     const res = await retryR2Operation(
       `Listing R2 page ${currentPage}`,
       async () => {
+        throwIfAborted(signal);
         const client = createR2Client(config);
         const command = new ListObjectsV2Command({
           Bucket: config.bucket,
@@ -189,9 +216,10 @@ export async function listR2Objects(
           ...(continuationToken ? { ContinuationToken: continuationToken } : {}),
         });
 
-        return client.send(command);
+        return client.send(command, signal ? { abortSignal: signal } : undefined);
       },
-      onProgress
+      onProgress,
+      signal
     );
     page = currentPage;
 
@@ -217,8 +245,10 @@ export async function listR2Objects(
 export async function downloadR2ObjectStream(
   config: R2Config,
   key: string,
-  onProgress?: (msg: string) => void
+  onProgress?: (msg: string) => void,
+  signal?: AbortSignal
 ): Promise<Readable> {
+  throwIfAborted(signal);
   onProgress?.(`  Downloading ${key}...`);
   const client = createR2Client(config);
 
@@ -227,7 +257,7 @@ export async function downloadR2ObjectStream(
     Key: key,
   });
 
-  const res = await client.send(command);
+  const res = await client.send(command, signal ? { abortSignal: signal } : undefined);
 
   if (!res.Body) {
     throw new Error(`Empty response for ${key}`);
@@ -240,26 +270,30 @@ export async function downloadR2ObjectToFile(
   config: R2Config,
   key: string,
   outputPath: string,
-  onProgress?: (msg: string) => void
+  onProgress?: (msg: string) => void,
+  signal?: AbortSignal
 ): Promise<string> {
   return retryR2Operation(
     `Downloading ${key}`,
     async () => {
+      throwIfAborted(signal);
       await rm(outputPath, { force: true }).catch(() => {});
-      const stream = await downloadR2ObjectStream(config, key, onProgress);
-      await pipelineWithIdleTimeout(stream, outputPath);
+      const stream = await downloadR2ObjectStream(config, key, onProgress, signal);
+      await pipelineWithIdleTimeout(stream, outputPath, signal);
       return outputPath;
     },
-    onProgress
+    onProgress,
+    signal
   );
 }
 
 export async function downloadR2Object(
   config: R2Config,
   key: string,
-  onProgress?: (msg: string) => void
+  onProgress?: (msg: string) => void,
+  signal?: AbortSignal
 ): Promise<Uint8Array> {
-  const stream = await downloadR2ObjectStream(config, key, onProgress);
+  const stream = await downloadR2ObjectStream(config, key, onProgress, signal);
   const buffer = await streamToBuffer(stream);
   return new Uint8Array(buffer);
 }

@@ -10,12 +10,21 @@ export interface PrefetchedR2Object {
   cleanup(): Promise<void>;
 }
 
+export interface PrefetchR2State {
+  activeDownloads: number;
+  bufferedFiles: number;
+  pendingObjects: number;
+  concurrency: number;
+}
+
 interface PrefetchR2ObjectsOptions {
   objects: R2Object[];
   tempDir: string;
   config?: R2Config;
   concurrency?: number;
   onProgress?: (msg: string) => void;
+  onStateChange?: (state: PrefetchR2State) => void;
+  shouldCancel?: () => boolean;
   downloadToFile?: (object: R2Object, tempPath: string) => Promise<void>;
 }
 
@@ -37,6 +46,12 @@ function buildTempPath(tempDir: string, index: number, key: string): string {
   return join(tempDir, `${String(index).padStart(6, "0")}-${safeName}`);
 }
 
+function createCancellationError(): Error {
+  const error = new Error("Backup cancelled");
+  error.name = "CancellationError";
+  return error;
+}
+
 export async function* prefetchR2ObjectsToDisk(
   options: PrefetchR2ObjectsOptions
 ): AsyncGenerator<PrefetchedR2Object> {
@@ -54,15 +69,36 @@ export async function* prefetchR2ObjectsToDisk(
   });
 
   let nextToSchedule = 0;
+  let activeDownloads = 0;
   const scheduled = new Map<number, Promise<ScheduledDownloadResult>>();
 
+  const notifyStateChange = () => {
+    options.onStateChange?.({
+      activeDownloads,
+      bufferedFiles: Math.max(scheduled.size - activeDownloads, 0),
+      pendingObjects: objects.length - nextToSchedule,
+      concurrency,
+    });
+  };
+
+  const throwIfCancelled = () => {
+    if (options.shouldCancel?.()) {
+      throw createCancellationError();
+    }
+  };
+
   const scheduleMore = () => {
+    throwIfCancelled();
+
     while (scheduled.size < concurrency && nextToSchedule < objects.length) {
       const index = nextToSchedule;
       const object = objects[index];
       const tempPath = buildTempPath(tempDir, index, object.key);
 
       const scheduledDownload = (async (): Promise<ScheduledDownloadResult> => {
+        activeDownloads += 1;
+        notifyStateChange();
+
         try {
           await downloadToFile(object, tempPath);
           return {
@@ -78,18 +114,25 @@ export async function* prefetchR2ObjectsToDisk(
         } catch (error) {
           await rm(tempPath, { force: true }).catch(() => {});
           return { ok: false, error };
+        } finally {
+          activeDownloads -= 1;
+          notifyStateChange();
         }
       })();
 
       scheduled.set(index, scheduledDownload);
       nextToSchedule += 1;
+      notifyStateChange();
     }
   };
 
+  notifyStateChange();
   scheduleMore();
 
   try {
     for (let index = 0; index < objects.length; index += 1) {
+      throwIfCancelled();
+
       const resultPromise = scheduled.get(index);
       if (!resultPromise) {
         throw new Error(`Missing prefetched R2 download for index ${index}`);
@@ -97,6 +140,7 @@ export async function* prefetchR2ObjectsToDisk(
 
       const result = await resultPromise;
       scheduled.delete(index);
+      notifyStateChange();
       scheduleMore();
 
       if (result.ok === false) {
@@ -116,5 +160,7 @@ export async function* prefetchR2ObjectsToDisk(
     });
 
     await Promise.allSettled(tempPaths.map((tempPath) => rm(tempPath, { force: true })));
+    activeDownloads = 0;
+    notifyStateChange();
   }
 }

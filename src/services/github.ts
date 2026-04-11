@@ -3,7 +3,13 @@ import { Readable } from "node:stream";
 
 const GITHUB_API = "https://api.github.com";
 
-async function assertBranchExists(repo: string, branch: string, token: string, onProgress?: (msg: string) => void) {
+async function assertBranchExists(
+  repo: string,
+  branch: string,
+  token: string,
+  onProgress?: (msg: string) => void,
+  signal?: AbortSignal
+) {
   const [owner, name] = repo.split("/");
   if (!owner || !name) throw new Error(`Invalid repo format: ${repo}`);
 
@@ -14,6 +20,7 @@ async function assertBranchExists(repo: string, branch: string, token: string, o
       Accept: "application/vnd.github+json",
       "X-GitHub-Api-Version": "2022-11-28",
     },
+    signal,
   });
 
   if (!refRes.ok) {
@@ -28,9 +35,10 @@ export async function fetchRepoZipStream(
   repo: string,
   branch: string,
   token: string,
-  onProgress?: (msg: string) => void
+  onProgress?: (msg: string) => void,
+  signal?: AbortSignal
 ): Promise<Readable> {
-  const { owner, name } = await assertBranchExists(repo, branch, token, onProgress);
+  const { owner, name } = await assertBranchExists(repo, branch, token, onProgress, signal);
 
   onProgress?.(`Downloading source from GitHub (${owner}/${name}@${branch})...`);
   const zipRes = await fetch(`${GITHUB_API}/repos/${owner}/${name}/zipball/${branch}`, {
@@ -38,6 +46,7 @@ export async function fetchRepoZipStream(
       Authorization: `Bearer ${token}`,
       Accept: "application/vnd.github.zip",
     },
+    signal,
   });
 
   if (!zipRes.ok) {
@@ -56,8 +65,9 @@ export async function fetchRepoZip(
   repo: string,
   branch: string,
   token: string,
-  onProgress?: (msg: string) => void
+  onProgress?: (msg: string) => void,
+  signal?: AbortSignal
 ): Promise<Uint8Array> {
-  const stream = await fetchRepoZipStream(repo, branch, token, onProgress);
+  const stream = await fetchRepoZipStream(repo, branch, token, onProgress, signal);
   return new Uint8Array(await new Response(stream as unknown as BodyInit).arrayBuffer());
 }

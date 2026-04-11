@@ -52,6 +52,10 @@
       transition: border-color 0.15s;
     }
     .field input:focus { border-color: #4a6cf7; }
+    .actions {
+      display: flex;
+      gap: 0.75rem;
+    }
     .btn {
       width: 100%;
       padding: 0.75rem;
@@ -66,6 +70,16 @@
     }
     .btn:hover:not(:disabled) { background: #3a5ce5; }
     .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+    .btn-secondary {
+      display: none;
+      background: #f34f5f;
+    }
+    .btn-secondary.visible {
+      display: block;
+    }
+    .btn-secondary:hover:not(:disabled) {
+      background: #d93b4f;
+    }
     #status {
       margin-top: 1.25rem;
       display: none;
@@ -125,7 +139,10 @@
       <label for="pw">Access Password</label>
       <input type="password" id="pw" placeholder="Enter password" autocomplete="current-password" />
     </div>
-    <button class="btn" id="startBtn" onclick="startBackup()">Create Backup</button>
+    <div class="actions">
+      <button class="btn" id="startBtn" onclick="startBackup()">Create Backup</button>
+      <button class="btn btn-secondary" id="cancelBtn" onclick="cancelBackup()">Cancel</button>
+    </div>
 
     <div id="status">
       <div class="progress-bar"><div class="progress-fill" id="fill"></div></div>
@@ -148,6 +165,7 @@
     async function startBackup() {
       const pw = document.getElementById("pw").value;
       const btn = document.getElementById("startBtn");
+      const cancelBtn = document.getElementById("cancelBtn");
       const status = document.getElementById("status");
       const errorBox = document.getElementById("errorBox");
       const successBox = document.getElementById("successBox");
@@ -156,6 +174,8 @@
       successBox.classList.remove("visible");
       btn.disabled = true;
       btn.textContent = "Creating Backup...";
+      cancelBtn.classList.add("visible");
+      cancelBtn.disabled = true;
       status.classList.add("visible");
       setProgress(0, "Starting...");
 
@@ -168,23 +188,31 @@
 
         if (res.status === 401) {
           showError("Incorrect password.");
-          resetBtn();
+          resetButtons();
           return;
         }
         if (!res.ok) {
           const err = await res.json().catch(() => ({ error: "Unknown error" }));
-          showError(err.error || `Request failed (${res.status})`);
-          resetBtn();
+          if (res.status === 409 && err.job_id) {
+            currentJobId = err.job_id;
+            btn.textContent = "Backup Running...";
+            cancelBtn.disabled = false;
+            startPolling(err.job_id);
+          } else {
+            showError(err.error || `Request failed (${res.status})`);
+            resetButtons();
+          }
           return;
         }
 
         const { job_id } = await res.json();
         currentJobId = job_id;
         btn.textContent = "Backup Running...";
+        cancelBtn.disabled = false;
         startPolling(job_id);
       } catch (e) {
         showError("Network error: " + e.message);
-        resetBtn();
+        resetButtons();
       }
     }
 
@@ -203,11 +231,20 @@
             setProgress(100, "Done!");
             triggerDownload(`/api/backup/${jobId}/download`);
             document.getElementById("successBox").classList.add("visible");
-            resetBtn();
+            currentJobId = null;
+            resetButtons();
           } else if (d.status === "error") {
             clearInterval(pollInterval);
             showError(d.message || "Backup failed.");
-            resetBtn();
+            currentJobId = null;
+            resetButtons();
+          } else if (d.status === "cancelled") {
+            clearInterval(pollInterval);
+            showError(d.message || "Backup cancelled.");
+            currentJobId = null;
+            resetButtons();
+          } else if (d.status === "cancelling") {
+            document.getElementById("cancelBtn").disabled = true;
           }
         } catch (e) {
           // Network error — keep polling
@@ -230,6 +267,27 @@
       box.classList.add("visible");
     }
 
+    async function cancelBackup() {
+      if (!currentJobId) return;
+
+      const cancelBtn = document.getElementById("cancelBtn");
+      cancelBtn.disabled = true;
+      setProgress(parseInt(document.getElementById("pctText").textContent, 10) || 0, "Cancelling backup...");
+
+      try {
+        const res = await fetch(`/api/backup/${currentJobId}`, { method: "DELETE" });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ error: "Unable to cancel backup." }));
+          showError(err.error || "Unable to cancel backup.");
+          cancelBtn.disabled = false;
+          return;
+        }
+      } catch (e) {
+        showError("Network error: " + e.message);
+        cancelBtn.disabled = false;
+      }
+    }
+
     function triggerDownload(url) {
       const a = document.createElement("a");
       a.href = url;
@@ -239,10 +297,13 @@
       document.body.removeChild(a);
     }
 
-    function resetBtn() {
-      const btn = document.getElementById("startBtn");
-      btn.disabled = false;
-      btn.textContent = "Create Backup";
+    function resetButtons() {
+      const startBtn = document.getElementById("startBtn");
+      const cancelBtn = document.getElementById("cancelBtn");
+      startBtn.disabled = false;
+      startBtn.textContent = "Create Backup";
+      cancelBtn.disabled = false;
+      cancelBtn.classList.remove("visible");
     }
   </script>
 </body>

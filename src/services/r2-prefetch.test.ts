@@ -30,6 +30,7 @@ describe("prefetchR2ObjectsToDisk", () => {
     const startedKeys: string[] = [];
     const yieldedKeys: string[] = [];
     const fileCountsDuringYield: number[] = [];
+    const reportedActiveDownloads: number[] = [];
 
     const delays = new Map([
       ["a.jpg", 60],
@@ -41,6 +42,9 @@ describe("prefetchR2ObjectsToDisk", () => {
       objects,
       tempDir: dir,
       concurrency: 2,
+      onStateChange: (state) => {
+        reportedActiveDownloads.push(state.activeDownloads);
+      },
       downloadToFile: async (object, tempPath) => {
         startedKeys.push(object.key);
         activeDownloads += 1;
@@ -60,6 +64,8 @@ describe("prefetchR2ObjectsToDisk", () => {
     expect(startedKeys.slice(0, 2)).toEqual(["a.jpg", "b.jpg"]);
     expect(maxActiveDownloads).toBe(2);
     expect(Math.max(...fileCountsDuringYield)).toBeLessThanOrEqual(2);
+    expect(reportedActiveDownloads).toContain(2);
+    expect(reportedActiveDownloads[reportedActiveDownloads.length - 1]).toBe(0);
     expect(readdirSync(dir)).toHaveLength(0);
   });
 });

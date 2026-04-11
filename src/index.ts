@@ -7,6 +7,9 @@ import {
   createJob,
   getJob,
   getActiveBackupJob,
+  getJobAbortSignal,
+  isJobCancellationRequested,
+  requestJobCancellation,
   updateJob,
   addSSEController,
   removeSSEController,
@@ -14,9 +17,10 @@ import {
   broadcastDone,
   broadcastError,
 } from "./lib/jobs.js";
+import { buildArchivingMessage } from "./lib/backup-status.js";
 import { fetchRepoZipStream } from "./services/github.js";
 import { createZipBuilder } from "./services/archiver.js";
-import { prefetchR2ObjectsToDisk } from "./services/r2-prefetch.js";
+import { prefetchR2ObjectsToDisk, type PrefetchR2State } from "./services/r2-prefetch.js";
 import { listR2Objects } from "./services/r2.js";
 
 // ─── Config ──────────────────────────────────────────────────────────────────
@@ -63,10 +67,32 @@ function calculateArchiveProgress(processedBytes: number, totalBytes: number, pr
   return 90;
 }
 
+function createCancellationError(): Error {
+  const error = new Error("Backup cancelled");
+  error.name = "CancellationError";
+  return error;
+}
+
+function isCancellationError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const text = `${error.name}: ${error.message}`.toLowerCase();
+  return text.includes("cancellationerror") || text.includes("aborterror") || text.includes("backup cancelled");
+}
+
 // ─── Backup Job Runner ────────────────────────────────────────────────────────
 async function runBackup(jobId: string) {
   const job = getJob(jobId);
   if (!job) return;
+
+  const abortSignal = getJobAbortSignal(jobId);
+  const throwIfCancelled = () => {
+    if (isJobCancellationRequested(jobId) || abortSignal?.aborted) {
+      throw createCancellationError();
+    }
+  };
 
   const r2Config = {
     endpoint: R2_ENDPOINT,
@@ -84,9 +110,14 @@ async function runBackup(jobId: string) {
     const zip = await createZipBuilder(zipPath);
 
     // 1. Fetch GitHub zip and stream directly into archive
+    throwIfCancelled();
     updateJob(jobId, { status: "preparing", progress: 5, message: "Fetching source from GitHub..." });
-    const sourceZipStream = await fetchRepoZipStream(GITHUB_REPO, GITHUB_BRANCH, GITHUB_TOKEN, (msg) =>
-      updateJob(jobId, { message: msg })
+    const sourceZipStream = await fetchRepoZipStream(
+      GITHUB_REPO,
+      GITHUB_BRANCH,
+      GITHUB_TOKEN,
+      (msg) => updateJob(jobId, { message: msg }),
+      abortSignal
     );
     await zip.appendEntry({
       name: `source/${repoName}-${dateStr}.zip`,
@@ -96,8 +127,9 @@ async function runBackup(jobId: string) {
     updateJob(jobId, { progress: 20, message: "Source archived." });
 
     // 2. List R2 objects
+    throwIfCancelled();
     updateJob(jobId, { status: "downloading_r2", progress: 25, message: "Listing R2 files..." });
-    const r2Objects = await listR2Objects(r2Config, (msg) => updateJob(jobId, { message: msg }));
+    const r2Objects = await listR2Objects(r2Config, (msg) => updateJob(jobId, { message: msg }), abortSignal);
     const totalBytes = r2Objects.reduce((sum, object) => sum + object.size, 0);
 
     if (r2Objects.length === 0) {
@@ -111,7 +143,7 @@ async function runBackup(jobId: string) {
     updateJob(jobId, {
       status: "archiving",
       progress: 30,
-      message: `Prefetching and archiving ${r2Objects.length} media files (${formatBytes(totalBytes)}) with ${R2_DOWNLOAD_CONCURRENCY} parallel R2 downloads...`,
+      message: `Preparing to archive ${r2Objects.length} media files (${formatBytes(totalBytes)})...`,
     });
 
     // 3. Prefetch R2 files to temp storage, then append them to the archive in order
@@ -119,6 +151,12 @@ async function runBackup(jobId: string) {
     let processedBytes = 0;
     let lastProgressAt = 0;
     let lastReportedFiles = 0;
+    let prefetchState: PrefetchR2State = {
+      activeDownloads: 0,
+      bufferedFiles: 0,
+      pendingObjects: r2Objects.length,
+      concurrency: R2_DOWNLOAD_CONCURRENCY,
+    };
 
     const reportMediaProgress = (force = false) => {
       const now = Date.now();
@@ -136,7 +174,13 @@ async function runBackup(jobId: string) {
       updateJob(jobId, {
         status: "archiving",
         progress: Math.min(90, calculateArchiveProgress(processedBytes, totalBytes, processedFiles, r2Objects.length)),
-        message: `Archiving media... ${processedFiles}/${r2Objects.length} (${formatBytes(processedBytes)}/${formatBytes(totalBytes)}) using ${R2_DOWNLOAD_CONCURRENCY} parallel downloads`,
+        message: buildArchivingMessage({
+          processedFiles,
+          totalFiles: r2Objects.length,
+          processedBytesLabel: formatBytes(processedBytes),
+          totalBytesLabel: formatBytes(totalBytes),
+          activeDownloads: prefetchState.activeDownloads,
+        }),
       });
     };
 
@@ -145,7 +189,13 @@ async function runBackup(jobId: string) {
       tempDir: mediaTempDir,
       config: r2Config,
       concurrency: R2_DOWNLOAD_CONCURRENCY,
+      shouldCancel: () => isJobCancellationRequested(jobId) || abortSignal?.aborted === true,
+      onStateChange: (state) => {
+        prefetchState = state;
+        reportMediaProgress();
+      },
     })) {
+      throwIfCancelled();
       await zip.appendEntry({
         name: `media/${prefetched.object.key}`,
         data: createReadStream(prefetched.tempPath),
@@ -161,6 +211,7 @@ async function runBackup(jobId: string) {
     reportMediaProgress(true);
 
     // 4. Finalize zip
+    throwIfCancelled();
     updateJob(jobId, { status: "archiving", progress: 95, message: "Finalizing backup archive..." });
     await zip.finalize();
 
@@ -175,6 +226,11 @@ async function runBackup(jobId: string) {
       } catch {
         // ignore cleanup failures for partial archives
       }
+    }
+
+    if (isJobCancellationRequested(jobId) || isCancellationError(err)) {
+      updateJob(jobId, { status: "cancelled", message: "Backup cancelled." });
+      return;
     }
 
     updateJob(jobId, { status: "error", message: msg, error: msg });
@@ -292,11 +348,19 @@ Bun.serve({
       return new Response(stream, { headers });
     }
 
-    // DELETE /api/backup/:id → cancel cleanup
+    // DELETE /api/backup/:id → request cancellation or remove completed job
     if (method === "DELETE" && path.match(/^\/api\/backup\/[^/]+$/)) {
       const id = path.split("/")[3];
+      const job = getJob(id);
+      if (!job) return Response.json({ error: "Job not found" }, { status: 404 });
+
+      if (["preparing", "downloading_r2", "archiving", "cancelling"].includes(job.status)) {
+        requestJobCancellation(id);
+        return Response.json({ ok: true, status: "cancelling" });
+      }
+
       await cleanupJob(id);
-      return Response.json({ ok: true });
+      return Response.json({ ok: true, status: "removed" });
     }
 
     return Response.json({ error: "Not found" }, { status: 404 });
