@@ -16,13 +16,18 @@ export interface Job {
 }
 
 const JOBS: Map<string, Job> = new Map();
+const ACTIVE_BACKUP_STATUSES: JobStatus[] = [
+  "preparing",
+  "downloading_r2",
+  "archiving",
+];
 const SSE_KEEPALIVE = 25_000; // 25s keepalive to prevent connection timeouts
 
 // Cleanup old jobs every 10 minutes
 setInterval(() => {
   const now = Date.now();
   const ONE_HOUR = 3_600_000;
-  for (const [id, job] of JOBS) {
+  for (const [id, job] of Array.from(JOBS.entries())) {
     if (job.createdAt < now - ONE_HOUR) {
       cleanupJob(id);
     }
@@ -46,6 +51,14 @@ export function getJob(id: string): Job | undefined {
   return JOBS.get(id);
 }
 
+export function getActiveBackupJob(): Job | undefined {
+  return Array.from(JOBS.values()).find((job) => ACTIVE_BACKUP_STATUSES.includes(job.status));
+}
+
+export function hasActiveBackupJob(): boolean {
+  return getActiveBackupJob() !== undefined;
+}
+
 export function updateJob(id: string, update: Partial<Pick<Job, "status" | "progress" | "message" | "zipPath" | "error">>) {
   const job = JOBS.get(id);
   if (!job) return;
@@ -55,7 +68,7 @@ export function updateJob(id: string, update: Partial<Pick<Job, "status" | "prog
   if (update.zipPath !== undefined) job.zipPath = update.zipPath;
   if (update.error !== undefined) job.error = update.error;
   // Broadcast to all SSE watchers
-  for (const ctrl of job._sseControllers) {
+  for (const ctrl of Array.from(job._sseControllers)) {
     try {
       const data = JSON.stringify({ status: job.status, progress: job.progress, message: job.message });
       ctrl.enqueue(`event: message\ndata: ${data}\n\n`);
@@ -88,7 +101,7 @@ export function removeSSEController(id: string, ctrl: ReadableStreamDefaultContr
 export function broadcastDone(id: string, downloadPath: string) {
   const job = JOBS.get(id);
   if (!job) return;
-  for (const ctrl of job._sseControllers) {
+  for (const ctrl of Array.from(job._sseControllers)) {
     try {
       const data = JSON.stringify({ status: "ready", progress: 100, message: "Backup ready!", download_url: `/api/backup/${id}/download` });
       ctrl.enqueue(`event: done\ndata: ${data}\n\n`);
@@ -103,7 +116,7 @@ export function broadcastError(id: string, error: string) {
   if (!job) return;
   job.status = "error";
   job.error = error;
-  for (const ctrl of job._sseControllers) {
+  for (const ctrl of Array.from(job._sseControllers)) {
     try {
       const data = JSON.stringify({ status: "error", progress: job.progress, message: error });
       ctrl.enqueue(`event: error\ndata: ${data}\n\n`);
@@ -117,7 +130,7 @@ export async function cleanupJob(id: string) {
   const job = JOBS.get(id);
   if (!job) return;
   job.status = "cancelled";
-  for (const ctrl of job._sseControllers) {
+  for (const ctrl of Array.from(job._sseControllers)) {
     try { ctrl.close(); } catch { /* ignore */ }
   }
   job._sseControllers.clear();
