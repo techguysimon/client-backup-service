@@ -33,7 +33,9 @@ export async function createBackupZip(
   // Add source zip
   for (const entry of entries) {
     onProgress?.(`Adding ${entry.name}...`, -1);
-    archive.append(entry.data, { name: entry.name });
+    // Ensure Buffer (archiver requires Node.js Buffer, not plain Uint8Array)
+    const nodeBuffer = Buffer.isBuffer(entry.data) ? entry.data : Buffer.from(entry.data);
+    archive.append(nodeBuffer, { name: entry.name });
   }
 
   archive.finalize();

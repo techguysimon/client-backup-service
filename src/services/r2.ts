@@ -1,5 +1,14 @@
-// Cloudflare R2 service — list and download objects via S3-compatible API
-// Uses native fetch with AWS Signature Version 4 signing (no AWS SDK needed)
+// Cloudflare R2 service — list and download objects via AWS S3 SDK
+import { S3Client, ListObjectsCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+import { Readable } from "node:stream";
+
+async function streamToBuffer(stream: Readable): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) {
+    chunks.push(Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
+}
 
 interface R2Config {
   endpoint: string;
@@ -14,109 +23,17 @@ export interface R2Object {
   lastModified: string;
 }
 
-function hmacSha256(key: Uint8Array, data: string): Uint8Array {
-  const { createHmac } = require("crypto") as typeof import("crypto");
-  return createHmac("sha256", Buffer.from(key)).update(data).digest();
-}
-
-function sha256Hex(data: string): string {
-  const { createHash } = require("crypto") as typeof import("crypto");
-  return createHash("sha256").update(data).digest("hex");
-}
-
-function buildAuthHeaders(
-  method: string,
-  path: string,
-  config: R2Config,
-  contentSha256: string,
-  extraHeaders: Record<string, string> = {}
-): Record<string, string> {
-  const now = new Date();
-  const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, "");
-  const dateStamp = amzDate.slice(0, 8);
-  const region = "auto";
-  const service = "s3";
-
-  const signedHeaders: Record<string, string> = {
-    ...extraHeaders,
-    "x-amz-date": amzDate,
-    "x-amz-content-sha256": contentSha256,
-    "x-amz-bucket-region": region,
-  };
-
-  // Sort headers case-insensitively
-  const sortedHeaderNames = Object.keys(signedHeaders)
-    .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
-
-  const canonicalHeaders = sortedHeaderNames
-    .map(k => `${k.toLowerCase()}:${signedHeaders[k]}`)
-    .join("\n") + "\n";
-
-  const signedHeaderNames = sortedHeaderNames.map(k => k.toLowerCase()).join(";");
-
-  const canonicalRequest = [
-    method,
-    path,
-    "", // no query string
-    canonicalHeaders,
-    signedHeaderNames,
-    contentSha256,
-  ].join("\n");
-
-  const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
-  const stringToSign = [
-    "AWS4-HMAC-SHA256",
-    amzDate,
-    credentialScope,
-    sha256Hex(canonicalRequest),
-  ].join("\n");
-
-  const kDate = hmacSha256(Buffer.from(`AWS4${config.secretKey}`, "utf8"), dateStamp);
-  const kRegion = hmacSha256(kDate, region);
-  const kService = hmacSha256(kRegion, service);
-  const kSigning = hmacSha256(kService, "aws4_request");
-  const signature = hmacSha256(kSigning, stringToSign).toString("hex");
-
-  const authorization = `AWS4-HMAC-SHA256 Credential=${config.accessKey}/${credentialScope}, SignedHeaders=${signedHeaderNames}, Signature=${signature}`;
-
-  const headers: Record<string, string> = {
-    ...signedHeaders,
-    Authorization: authorization,
-  };
-
-  return headers;
-}
-
-function s3Request(
-  method: string,
-  urlPath: string,
-  config: R2Config,
-  body?: string
-): Record<string, string> {
-  const path = `/${config.bucket}${urlPath}`;
-  const sha256 = body ? sha256Hex(body) : "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-  return buildAuthHeaders(method, path, config, sha256);
-}
-
-function parseR2ListXml(xml: string): Array<{ key: string; size: number; lastModified: string }> {
-  const results: Array<{ key: string; size: number; lastModified: string }> = [];
-
-  // Parse Key, Size, LastModified in order — each <Contents> block
-  const contentsBlocks = xml.split("<Contents>");
-  for (const block of contentsBlocks) {
-    if (!block.includes("<Key>")) continue;
-    const keyMatch = /<Key>([\s\S]*?)<\/Key>/.exec(block);
-    const sizeMatch = /<Size>(\d+)<\/Size>/.exec(block);
-    const dateMatch = /<LastModified>([\s\S]*?)<\/LastModified>/.exec(block);
-    if (keyMatch) {
-      results.push({
-        key: keyMatch[1].trim(),
-        size: sizeMatch ? parseInt(sizeMatch[1]) : 0,
-        lastModified: dateMatch ? dateMatch[1].trim() : "",
-      });
-    }
-  }
-  return results;
+function createR2Client(config: R2Config): S3Client {
+  return new S3Client({
+    region: "auto",
+    endpoint: config.endpoint,
+    credentials: {
+      accessKeyId: config.accessKey,
+      secretAccessKey: config.secretKey,
+    },
+    forcePathStyle: true,
+    maxAttempts: 3,
+  });
 }
 
 export async function listR2Objects(
@@ -124,36 +41,33 @@ export async function listR2Objects(
   onProgress?: (msg: string) => void
 ): Promise<R2Object[]> {
   onProgress?.("Fetching R2 file list...");
-  const path = "/?list-type=2&max-keys=1000";
-  const headers = s3Request("GET", path, config);
-  const res = await fetch(`${config.endpoint}${path}`, { headers });
+  const client = createR2Client(config);
+  const allObjects: R2Object[] = [];
+  let continuationToken: string | undefined;
 
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`R2 list failed (${res.status}): ${text}`);
-  }
+  do {
+    const command = new ListObjectsCommand({
+      Bucket: config.bucket,
+      MaxKeys: 1000,
+      ...(continuationToken ? { ContinuationToken: continuationToken } : {}),
+    });
 
-  const xml = await res.text();
-  const objects = parseR2ListXml(xml);
-  const allObjects = [...objects];
+    const res = await client.send(command);
 
-  // Handle pagination
-  if (xml.includes("<IsTruncated>true</IsTruncated>")) {
-    let continuationToken = xml.match(/<NextContinuationToken>(.*?)<\/NextContinuationToken>/)?.[1];
-    while (continuationToken) {
-      const nextPath = `/?list-type=2&max-keys=1000&continuation-token=${encodeURIComponent(continuationToken)}`;
-      const nextHeaders = s3Request("GET", nextPath, config);
-      const nextRes = await fetch(`${config.endpoint}${nextPath}`, { headers: nextHeaders });
-      if (!nextRes.ok) break;
-      const nextXml = await nextRes.text();
-      allObjects.push(...parseR2ListXml(nextXml));
-      if (nextXml.includes("<IsTruncated>true</IsTruncated>")) {
-        continuationToken = nextXml.match(/<NextContinuationToken>(.*?)<\/NextContinuationToken>/)?.[1] ?? "";
-      } else {
-        break;
+    if (res.Contents) {
+      for (const obj of res.Contents) {
+        if (obj.Key) {
+          allObjects.push({
+            key: obj.Key,
+            size: obj.Size ?? 0,
+            lastModified: obj.LastModified?.toISOString() ?? "",
+          });
+        }
       }
     }
-  }
+
+    continuationToken = res.IsTruncated ? (res.NextContinuationToken ?? undefined) : undefined;
+  } while (continuationToken);
 
   return allObjects;
 }
@@ -164,10 +78,19 @@ export async function downloadR2Object(
   onProgress?: (msg: string) => void
 ): Promise<Uint8Array> {
   onProgress?.(`  Downloading ${key}...`);
-  const path = `/${encodeURIComponent(key)}`;
-  const headers = s3Request("GET", path, config);
-  const res = await fetch(`${config.endpoint}/${config.bucket}${path}`, { headers });
-  if (!res.ok) throw new Error(`R2 download failed for ${key} (${res.status})`);
-  const ab = await res.arrayBuffer();
-  return new Uint8Array(ab);
+  const client = createR2Client(config);
+
+  const command = new GetObjectCommand({
+    Bucket: config.bucket,
+    Key: key,
+  });
+
+  const res = await client.send(command);
+
+  if (!res.Body) {
+    throw new Error(`Empty response for ${key}`);
+  }
+
+  const buffer = await res.Body.transformToByteArray();
+  return new Uint8Array(buffer);
 }
