@@ -1,4 +1,4 @@
-// Client Backup Service — Bun.serve entry point
+// IDS X Backup Service — Bun.serve entry point
 import { readFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { checkPassword } from "./lib/auth.js";
@@ -9,17 +9,17 @@ import { createBackupZip, type ArchiveEntry } from "./services/archiver.js";
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 const PORT = parseInt(process.env.PORT ?? "8080");
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN ?? "";
+const GITHUB_TOKEN=process.env.GITHUB_TOKEN ?? "";
 const GITHUB_REPO = process.env.GITHUB_REPO ?? "techguysimon/idrivesocal-main";
 const GITHUB_BRANCH = process.env.GITHUB_BRANCH ?? "main";
 const R2_ENDPOINT = process.env.R2_ENDPOINT ?? "";
 const R2_ACCESS_KEY = process.env.R2_ACCESS_KEY ?? "";
-const R2_SECRET_KEY = process.env.R2_SECRET_KEY ?? "";
+const R2_SECRET_KEY=process.env.R2_SECRET_KEY ?? "";
 const R2_BUCKET = process.env.R2_BUCKET ?? "idrivesocal-media";
 const TEMP_DIR = "/tmp/backups";
 mkdirSync(TEMP_DIR, { recursive: true });
 
-// ─── HTML UI ──────────────────────────────────────────────────────────────────
+// ─── HTML UI ─────────────────────────────────────────────────────────────────
 const UI_HTML = readFileSync(join(process.cwd(), "public", "index.html"), "utf-8");
 
 // ─── Backup Job Runner ────────────────────────────────────────────────────────
@@ -184,4 +184,4 @@ Bun.serve({
   },
 });
 
-console.log(`Client Backup Service running on port ${PORT}`);
+console.log(`IDSX Backup Service running on port ${PORT}`);
