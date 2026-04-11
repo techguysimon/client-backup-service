@@ -21,3 +21,6 @@ caproverOneClickApp:
     - key: R2_BUCKET
       description: R2 bucket name, e.g. idrivesocal-media
       defaultValue: idrivesocal-media
+    - key: R2_DOWNLOAD_CONCURRENCY
+      description: Number of R2 objects to prefetch to temp storage in parallel before archiving
+      defaultValue: '4'

@@ -16,6 +16,7 @@
         "R2_ACCESS_KEY": "$$cap_r2_access_key$$",
         "R2_SECRET_KEY": "$$cap_r2_secret_key$$",
         "R2_BUCKET": "$$cap_r2_bucket$$",
+        "R2_DOWNLOAD_CONCURRENCY": "$$cap_r2_download_concurrency$$",
         "PORT": "8080"
       },
       "caproverExtra": {
@@ -34,7 +35,8 @@
       { "id": "$$cap_r2_endpoint$$", "label": "Cloudflare R2 Endpoint", "description": "R2 endpoint URL from the R2 dashboard (Settings > R2)", "defaultValue": "", "validRegex": "" },
       { "id": "$$cap_r2_access_key$$", "label": "R2 Access Key ID", "defaultValue": "", "validRegex": "" },
       { "id": "$$cap_r2_secret_key$$", "label": "R2 Secret Access Key", "defaultValue": "", "validRegex": "" },
-      { "id": "$$cap_r2_bucket$$", "label": "R2 Bucket Name", "description": "The R2 bucket containing media files to back up", "defaultValue": "idrivesocal-media", "validRegex": "" }
+      { "id": "$$cap_r2_bucket$$", "label": "R2 Bucket Name", "description": "The R2 bucket containing media files to back up", "defaultValue": "idrivesocal-media", "validRegex": "" },
+      { "id": "$$cap_r2_download_concurrency$$", "label": "Parallel R2 Downloads", "description": "How many R2 objects to prefetch to temp storage in parallel before archiving", "defaultValue": "4", "validRegex": "/^[1-9][0-9]*$/" }
     ],
     "instructions": {
       "start": "Deploys a self-service backup download page for your client. Enter GitHub repo and R2 credentials. Your client visits the URL, enters a password, and downloads a zip with latest source + all R2 media files.",

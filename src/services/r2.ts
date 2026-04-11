@@ -1,6 +1,8 @@
 // Cloudflare R2 service — list and stream objects via AWS S3 SDK
 import { S3Client, ListObjectsV2Command, GetObjectCommand } from "@aws-sdk/client-s3";
+import { createWriteStream } from "node:fs";
 import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 
 async function streamToBuffer(stream: Readable): Promise<Buffer> {
   const chunks: Buffer[] = [];
@@ -10,7 +12,7 @@ async function streamToBuffer(stream: Readable): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
-interface R2Config {
+export interface R2Config {
   endpoint: string;
   accessKey: string;
   secretKey: string;
@@ -131,6 +133,17 @@ export async function downloadR2ObjectStream(
   }
 
   return toNodeReadable(res.Body);
+}
+
+export async function downloadR2ObjectToFile(
+  config: R2Config,
+  key: string,
+  outputPath: string,
+  onProgress?: (msg: string) => void
+): Promise<string> {
+  const stream = await downloadR2ObjectStream(config, key, onProgress);
+  await pipeline(stream, createWriteStream(outputPath));
+  return outputPath;
 }
 
 export async function downloadR2Object(

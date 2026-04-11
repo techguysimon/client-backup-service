@@ -1,6 +1,6 @@
 // IDSC Backup Service — Bun.serve entry point
-import { readFileSync, mkdirSync, existsSync } from "node:fs";
-import { unlink } from "node:fs/promises";
+import { createReadStream, readFileSync, mkdirSync, existsSync } from "node:fs";
+import { rm, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { checkPassword } from "./lib/auth.js";
 import {
@@ -15,8 +15,9 @@ import {
   broadcastError,
 } from "./lib/jobs.js";
 import { fetchRepoZipStream } from "./services/github.js";
-import { listR2Objects, downloadR2ObjectStream } from "./services/r2.js";
 import { createZipBuilder } from "./services/archiver.js";
+import { prefetchR2ObjectsToDisk } from "./services/r2-prefetch.js";
+import { listR2Objects } from "./services/r2.js";
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 const PORT = parseInt(process.env.PORT ?? "8080");
@@ -27,6 +28,7 @@ const R2_ENDPOINT = process.env.R2_ENDPOINT ?? "";
 const R2_ACCESS_KEY = process.env.R2_ACCESS_KEY ?? "";
 const R2_SECRET_KEY = process.env.R2_SECRET_KEY ?? "";
 const R2_BUCKET = process.env.R2_BUCKET ?? "idrivesocal-media";
+const R2_DOWNLOAD_CONCURRENCY = Math.max(1, parseInt(process.env.R2_DOWNLOAD_CONCURRENCY ?? "4", 10) || 4);
 const TEMP_DIR = "/tmp/backups";
 mkdirSync(TEMP_DIR, { recursive: true });
 
@@ -76,6 +78,7 @@ async function runBackup(jobId: string) {
   const repoName = GITHUB_REPO.replace("/", "-");
   const dateStr = new Date().toISOString().slice(0, 10);
   const zipPath = `${TEMP_DIR}/backup-${jobId}.zip`;
+  const mediaTempDir = join(TEMP_DIR, `media-${jobId}`);
 
   try {
     const zip = await createZipBuilder(zipPath);
@@ -108,10 +111,10 @@ async function runBackup(jobId: string) {
     updateJob(jobId, {
       status: "archiving",
       progress: 30,
-      message: `Streaming ${r2Objects.length} media files (${formatBytes(totalBytes)}) into archive...`,
+      message: `Prefetching and archiving ${r2Objects.length} media files (${formatBytes(totalBytes)}) with ${R2_DOWNLOAD_CONCURRENCY} parallel R2 downloads...`,
     });
 
-    // 3. Stream R2 files directly into the archive
+    // 3. Prefetch R2 files to temp storage, then append them to the archive in order
     let processedFiles = 0;
     let processedBytes = 0;
     let lastProgressAt = 0;
@@ -133,20 +136,25 @@ async function runBackup(jobId: string) {
       updateJob(jobId, {
         status: "archiving",
         progress: Math.min(90, calculateArchiveProgress(processedBytes, totalBytes, processedFiles, r2Objects.length)),
-        message: `Streaming media into archive... ${processedFiles}/${r2Objects.length} (${formatBytes(processedBytes)}/${formatBytes(totalBytes)})`,
+        message: `Archiving media... ${processedFiles}/${r2Objects.length} (${formatBytes(processedBytes)}/${formatBytes(totalBytes)}) using ${R2_DOWNLOAD_CONCURRENCY} parallel downloads`,
       });
     };
 
-    for (const object of r2Objects) {
-      const objectStream = await downloadR2ObjectStream(r2Config, object.key);
+    for await (const prefetched of prefetchR2ObjectsToDisk({
+      objects: r2Objects,
+      tempDir: mediaTempDir,
+      config: r2Config,
+      concurrency: R2_DOWNLOAD_CONCURRENCY,
+    })) {
       await zip.appendEntry({
-        name: `media/${object.key}`,
-        data: objectStream,
+        name: `media/${prefetched.object.key}`,
+        data: createReadStream(prefetched.tempPath),
         store: true,
       });
+      await prefetched.cleanup();
 
       processedFiles += 1;
-      processedBytes += object.size;
+      processedBytes += prefetched.object.size;
       reportMediaProgress();
     }
 
@@ -171,6 +179,8 @@ async function runBackup(jobId: string) {
 
     updateJob(jobId, { status: "error", message: msg, error: msg });
     broadcastError(jobId, msg);
+  } finally {
+    await rm(mediaTempDir, { recursive: true, force: true }).catch(() => {});
   }
 }
 

@@ -1,4 +1,7 @@
-import { beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Readable } from "node:stream";
 
 const sendMock = mock(async (command: { input?: Record<string, unknown> }) => {
@@ -60,11 +63,18 @@ mock.module("@aws-sdk/client-s3", () => ({
   GetObjectCommand: MockGetObjectCommand,
 }));
 
-const { listR2Objects, downloadR2ObjectStream } = await import("./r2.ts");
+const tempDirs: string[] = [];
+const { listR2Objects, downloadR2ObjectStream, downloadR2ObjectToFile } = await import("./r2.ts");
 
 describe("r2 service", () => {
   beforeEach(() => {
     sendMock.mockClear();
+  });
+
+  afterEach(() => {
+    for (const dir of tempDirs.splice(0)) {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("continues through every truncated page", async () => {
@@ -92,6 +102,27 @@ describe("r2 service", () => {
     );
 
     expect(await new Response(stream as unknown as BodyInit).text()).toBe("streamed-object");
+    expect(sendMock).toHaveBeenCalledTimes(1);
+  });
+
+  test("writes an object body directly to a temp file", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "client-backup-r2-file-"));
+    tempDirs.push(dir);
+    const outputPath = join(dir, "first.jpg");
+
+    const writtenPath = await downloadR2ObjectToFile(
+      {
+        endpoint: "https://example.r2.cloudflarestorage.com",
+        accessKey: "test-access-key",
+        secretKey: "test-secret-key",
+        bucket: "test-bucket",
+      },
+      "first.jpg",
+      outputPath
+    );
+
+    expect(writtenPath).toBe(outputPath);
+    expect(readFileSync(outputPath, "utf8")).toBe("streamed-object");
     expect(sendMock).toHaveBeenCalledTimes(1);
   });
 });
