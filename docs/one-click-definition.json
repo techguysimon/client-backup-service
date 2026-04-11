@@ -17,6 +17,8 @@
         "R2_SECRET_KEY": "$$cap_r2_secret_key$$",
         "R2_BUCKET": "$$cap_r2_bucket$$",
         "R2_DOWNLOAD_CONCURRENCY": "$$cap_r2_download_concurrency$$",
+        "BACKUP_STORAGE_DIR": "$$cap_backup_storage_dir$$",
+        "BUN_IDLE_TIMEOUT_SECONDS": "$$cap_bun_idle_timeout_seconds$$",
         "PORT": "8080"
       },
       "caproverExtra": {
@@ -36,7 +38,9 @@
       { "id": "$$cap_r2_access_key$$", "label": "R2 Access Key ID", "defaultValue": "", "validRegex": "" },
       { "id": "$$cap_r2_secret_key$$", "label": "R2 Secret Access Key", "defaultValue": "", "validRegex": "" },
       { "id": "$$cap_r2_bucket$$", "label": "R2 Bucket Name", "description": "The R2 bucket containing media files to back up", "defaultValue": "idrivesocal-media", "validRegex": "" },
-      { "id": "$$cap_r2_download_concurrency$$", "label": "Parallel R2 Downloads", "description": "How many R2 objects to prefetch to temp storage in parallel before archiving", "defaultValue": "4", "validRegex": "/^[1-9][0-9]*$/" }
+      { "id": "$$cap_r2_download_concurrency$$", "label": "Parallel R2 Downloads", "description": "How many R2 objects to prefetch to temp storage in parallel before archiving", "defaultValue": "4", "validRegex": "/^[1-9][0-9]*$/" },
+      { "id": "$$cap_backup_storage_dir$$", "label": "Backup Storage Directory", "description": "Persistent directory inside the container for generated zips and temp files", "defaultValue": "/captain/data/backups", "validRegex": "" },
+      { "id": "$$cap_bun_idle_timeout_seconds$$", "label": "Bun Idle Timeout Seconds", "description": "Increase this for long-running download connections", "defaultValue": "300", "validRegex": "/^[1-9][0-9]*$/" }
     ],
     "instructions": {
       "start": "Deploys a self-service backup download page for your client. Enter GitHub repo and R2 credentials. Your client visits the URL, enters a password, and downloads a zip with latest source + all R2 media files.",

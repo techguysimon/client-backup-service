@@ -24,3 +24,9 @@ caproverOneClickApp:
     - key: R2_DOWNLOAD_CONCURRENCY
       description: Number of R2 objects to prefetch to temp storage in parallel before archiving
       defaultValue: '4'
+    - key: BACKUP_STORAGE_DIR
+      description: Optional persistent directory to store generated backup zips and temp files
+      defaultValue: /captain/data/backups
+    - key: BUN_IDLE_TIMEOUT_SECONDS
+      description: Bun.serve idle timeout in seconds for long-running download connections
+      defaultValue: '300'

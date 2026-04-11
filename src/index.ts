@@ -1,7 +1,7 @@
 // IDSC Backup Service — Bun.serve entry point
 import { createReadStream, readFileSync, mkdirSync, existsSync } from "node:fs";
 import { rm, unlink } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { checkPassword } from "./lib/auth.js";
 import {
   createJob,
@@ -18,6 +18,7 @@ import {
   broadcastError,
 } from "./lib/jobs.js";
 import { buildArchivingMessage } from "./lib/backup-status.js";
+import { resolveBackupStorageDir, resolveBunIdleTimeoutSeconds } from "./lib/server-config.js";
 import { fetchRepoZipStream } from "./services/github.js";
 import { createZipBuilder } from "./services/archiver.js";
 import { prefetchR2ObjectsToDisk, type PrefetchR2State } from "./services/r2-prefetch.js";
@@ -33,8 +34,9 @@ const R2_ACCESS_KEY = process.env.R2_ACCESS_KEY ?? "";
 const R2_SECRET_KEY = process.env.R2_SECRET_KEY ?? "";
 const R2_BUCKET = process.env.R2_BUCKET ?? "idrivesocal-media";
 const R2_DOWNLOAD_CONCURRENCY = Math.max(1, parseInt(process.env.R2_DOWNLOAD_CONCURRENCY ?? "4", 10) || 4);
-const TEMP_DIR = "/tmp/backups";
-mkdirSync(TEMP_DIR, { recursive: true });
+const BACKUP_STORAGE_DIR = resolveBackupStorageDir(existsSync);
+const BUN_IDLE_TIMEOUT_SECONDS = resolveBunIdleTimeoutSeconds();
+mkdirSync(BACKUP_STORAGE_DIR, { recursive: true });
 
 // ─── HTML UI ─────────────────────────────────────────────────────────────────
 const UI_HTML = readFileSync(join(process.cwd(), "public", "index.html"), "utf-8");
@@ -103,8 +105,8 @@ async function runBackup(jobId: string) {
 
   const repoName = GITHUB_REPO.replace("/", "-");
   const dateStr = new Date().toISOString().slice(0, 10);
-  const zipPath = `${TEMP_DIR}/backup-${jobId}.zip`;
-  const mediaTempDir = join(TEMP_DIR, `media-${jobId}`);
+  const zipPath = join(BACKUP_STORAGE_DIR, `backup-${jobId}.zip`);
+  const mediaTempDir = join(BACKUP_STORAGE_DIR, `media-${jobId}`);
 
   try {
     const zip = await createZipBuilder(zipPath);
@@ -243,6 +245,7 @@ async function runBackup(jobId: string) {
 // ─── Bun.serve ───────────────────────────────────────────────────────────────
 Bun.serve({
   port: PORT,
+  idleTimeout: BUN_IDLE_TIMEOUT_SECONDS,
   async fetch(req) {
     const url = new URL(req.url);
     const path = url.pathname;
