@@ -1,5 +1,5 @@
 // Client Backup Service — Bun.serve entry point
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { checkPassword } from "./lib/auth.js";
 import { createJob, getJob, updateJob, addSSEController, removeSSEController, cleanupJob, broadcastDone, broadcastError } from "./lib/jobs.js";
@@ -17,8 +17,9 @@ const R2_ACCESS_KEY = process.env.R2_ACCESS_KEY ?? "";
 const R2_SECRET_KEY = process.env.R2_SECRET_KEY ?? "";
 const R2_BUCKET = process.env.R2_BUCKET ?? "idrivesocal-media";
 const TEMP_DIR = "/tmp/backups";
+mkdirSync(TEMP_DIR, { recursive: true });
 
-// ─── HTML UI ─────────────────────────────────────────────────────────────────
+// ─── HTML UI ──────────────────────────────────────────────────────────────────
 const UI_HTML = readFileSync(join(process.cwd(), "public", "index.html"), "utf-8");
 
 // ─── Backup Job Runner ────────────────────────────────────────────────────────
