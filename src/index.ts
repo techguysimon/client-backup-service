@@ -184,4 +184,4 @@ Bun.serve({
   },
 });
 
-console.log(`IDSX Backup Service running on port ${PORT}`);
+console.log(`IDSC Backup Service running on port ${PORT}`);
