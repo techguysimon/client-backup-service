@@ -1,5 +1,6 @@
 // Cloudflare R2 service — list and stream objects via AWS S3 SDK
 import { S3Client, ListObjectsV2Command, GetObjectCommand } from "@aws-sdk/client-s3";
+import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { createWriteStream } from "node:fs";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -25,6 +26,10 @@ export interface R2Object {
   lastModified: string;
 }
 
+const R2_CONNECTION_TIMEOUT_MS = 10_000;
+const R2_REQUEST_TIMEOUT_MS = 300_000;
+const R2_SOCKET_TIMEOUT_MS = 60_000;
+
 function createR2Client(config: R2Config): S3Client {
   return new S3Client({
     region: "auto",
@@ -35,6 +40,12 @@ function createR2Client(config: R2Config): S3Client {
     },
     forcePathStyle: true,
     maxAttempts: 3,
+    requestHandler: new NodeHttpHandler({
+      connectionTimeout: R2_CONNECTION_TIMEOUT_MS,
+      requestTimeout: R2_REQUEST_TIMEOUT_MS,
+      socketTimeout: R2_SOCKET_TIMEOUT_MS,
+      throwOnRequestTimeout: true,
+    }),
   });
 }
 

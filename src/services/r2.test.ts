@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 
+let lastS3ClientConfig: Record<string, unknown> | undefined;
+let lastHttpHandlerOptions: Record<string, unknown> | undefined;
+
 const sendMock = mock(async (command: { input?: Record<string, unknown> }) => {
   if (command instanceof MockListObjectsV2Command) {
     const token = command.input?.ContinuationToken as string | undefined;
@@ -52,10 +55,24 @@ class MockGetObjectCommand {
 }
 
 class MockS3Client {
+  constructor(config?: Record<string, unknown>) {
+    lastS3ClientConfig = config;
+  }
+
   send(command: { input?: Record<string, unknown> }) {
     return sendMock(command);
   }
 }
+
+class MockNodeHttpHandler {
+  constructor(options?: Record<string, unknown>) {
+    lastHttpHandlerOptions = options;
+  }
+}
+
+mock.module("@smithy/node-http-handler", () => ({
+  NodeHttpHandler: MockNodeHttpHandler,
+}));
 
 mock.module("@aws-sdk/client-s3", () => ({
   S3Client: MockS3Client,
@@ -69,6 +86,8 @@ const { listR2Objects, downloadR2ObjectStream, downloadR2ObjectToFile } = await 
 describe("r2 service", () => {
   beforeEach(() => {
     sendMock.mockClear();
+    lastS3ClientConfig = undefined;
+    lastHttpHandlerOptions = undefined;
   });
 
   afterEach(() => {
@@ -88,6 +107,24 @@ describe("r2 service", () => {
     expect(objects).toHaveLength(2);
     expect(objects.map((object) => object.key)).toEqual(["first.jpg", "second.jpg"]);
     expect(sendMock).toHaveBeenCalledTimes(2);
+  });
+
+  test("configures R2 requests with explicit HTTP timeouts", async () => {
+    await downloadR2ObjectStream(
+      {
+        endpoint: "https://example.r2.cloudflarestorage.com",
+        accessKey: "test-access-key",
+        secretKey: "test-secret-key",
+        bucket: "test-bucket",
+      },
+      "first.jpg"
+    );
+
+    expect(lastS3ClientConfig?.requestHandler).toBeDefined();
+    expect(lastHttpHandlerOptions).toBeDefined();
+    expect(lastHttpHandlerOptions?.connectionTimeout).toBeGreaterThan(0);
+    expect(lastHttpHandlerOptions?.requestTimeout).toBeGreaterThan(0);
+    expect(lastHttpHandlerOptions?.socketTimeout).toBeGreaterThan(0);
   });
 
   test("returns an object body as a stream", async () => {
