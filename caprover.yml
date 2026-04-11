@@ -28,5 +28,5 @@ caproverOneClickApp:
       description: Optional persistent directory to store generated backup zips and temp files
       defaultValue: /captain/data/backups
     - key: BUN_IDLE_TIMEOUT_SECONDS
-      description: Bun.serve idle timeout in seconds for long-running download connections
-      defaultValue: '300'
+      description: Bun.serve idle timeout in seconds for long-running download connections (max 255)
+      defaultValue: '240'

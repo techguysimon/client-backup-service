@@ -52,9 +52,15 @@ describe("server config", () => {
     expect(resolveBunIdleTimeoutSeconds()).toBe(DEFAULT_BUN_IDLE_TIMEOUT_SECONDS);
   });
 
-  test("accepts explicit Bun idle timeout overrides", () => {
+  test("accepts explicit Bun idle timeout overrides within Bun's limit", () => {
+    process.env.BUN_IDLE_TIMEOUT_SECONDS = "180";
+
+    expect(resolveBunIdleTimeoutSeconds()).toBe(180);
+  });
+
+  test("caps Bun idle timeout overrides at Bun's maximum", () => {
     process.env.BUN_IDLE_TIMEOUT_SECONDS = "300";
 
-    expect(resolveBunIdleTimeoutSeconds()).toBe(300);
+    expect(resolveBunIdleTimeoutSeconds()).toBe(255);
   });
 });
